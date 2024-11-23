@@ -1,6 +1,7 @@
 import argparse
 import os
 from random import random, randint, sample
+import math
 
 import numpy as np
 import torch
@@ -20,11 +21,11 @@ def get_args():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--gamma", type=float, default=0.99)
 
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=128)
 
-    parser.add_argument("--initial_epsilon", type=float, default=1)
-    parser.add_argument("--final_epsilon", type=float, default=0.1)
-    parser.add_argument("--num_decay_steps", type=float, default=10000)
+    parser.add_argument("--initial_epsilon", type=float, default=1.0)
+    parser.add_argument("--final_epsilon", type=float, default=0.01)
+    parser.add_argument("--num_decay_steps", type=float, default=5000)
 
     parser.add_argument("--num_episodes", type=int, default=20000)
     parser.add_argument("--replay_memory_size", type=int, default=100000)
@@ -39,17 +40,10 @@ def get_args():
     return args
 
 
-def compute_epsilon(total_steps, initial_epsilon, final_epsilon, num_decay_steps):
-    # 남은 decay steps 계산 (최소 0)
-    remaining_decay = max(num_decay_steps - total_steps, 0)
-
-    # Linear decay 계산
-    epsilon_decay = remaining_decay * \
-        (initial_epsilon - final_epsilon) / num_decay_steps
-
-    # 최종 epsilon = 최소값 + decay값
-    current_epsilon = final_epsilon + epsilon_decay
-
+def compute_epsilon_exponential(total_steps, initial_epsilon, final_epsilon, num_decay_steps):
+    decay_rate = -math.log(final_epsilon / initial_epsilon) / num_decay_steps
+    current_epsilon = final_epsilon + \
+        (initial_epsilon - final_epsilon) * math.exp(-decay_rate * total_steps)
     return current_epsilon
 
 
@@ -85,21 +79,25 @@ def train(opt):
 
     while num_episodes < opt.num_episodes:
         num_episodes += 1
-        episode_reward = 0
-        episode_cleared_lines = 0
         state = env.reset().to(device)
         done = False
+
+        total_loss = 0
+        episode_steps = 0
 
         # Episode 실행
         while not done:
             total_steps += 1
+            episode_steps += 1
 
             # Epsilon-greedy로 행동 선택
-            epsilon = compute_epsilon(
+            epsilon = compute_epsilon_exponential(
                 total_steps=total_steps,
                 initial_epsilon=opt.initial_epsilon,
                 final_epsilon=opt.final_epsilon,
                 num_decay_steps=opt.num_decay_steps)
+            # Epsilon 값 로깅 (매 스텝마다)
+            writer.add_scalar('Train/Epsilon', epsilon, total_steps)
 
             next_steps = env.get_next_states()
             next_actions, next_states = zip(*next_steps.items())
@@ -116,14 +114,12 @@ def train(opt):
 
             # 경험 저장
             replay_memory.append([state, reward, next_state, done])
-            if len(replay_memory) > opt.replay_memory_size:
-                replay_memory.popleft()
 
+            # 상태 업데이트
             state = next_state
 
-            # Training step (일정 주기로 실행)
-            # if total_steps % opt.train_freq == 0 and len(replay_memory) >= opt.batch_size:
-            if len(replay_memory) < opt.batch_size or len(replay_memory) < opt.replay_memory_size // 10:
+            # Training step
+            if len(replay_memory) < max(opt.batch_size, opt.replay_memory_size // 10):
                 continue
 
             # Batch 샘플링
@@ -139,38 +135,47 @@ def train(opt):
             next_state_batch = torch.stack(
                 tuple(state for state in next_state_batch)).to(device)
 
-            # Q-learning update
-            with torch.no_grad():
-                next_prediction_batch = target_model(next_state_batch)
+            # Q-value 예측
             q_values = model(state_batch)
 
-            y_batch = torch.cat(
-                tuple(reward if done else reward + opt.gamma * prediction
-                      for reward, done, prediction in zip(reward_batch, done_batch, next_prediction_batch))
-            )[:, None]
+            # Target Q-value 계산
+            with torch.no_grad():
+                next_prediction_batch = target_model(next_state_batch)
+            opt_q_values = reward_batch + opt.gamma * next_prediction_batch.max(
+                1, keepdim=True)[0] * (1 - torch.tensor(done_batch).float().unsqueeze(1).to(device))
 
             # Optimization
-            loss = F.mse_loss(q_values, y_batch)
+            loss = F.mse_loss(q_values, opt_q_values)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            writer.add_scalar('Train/Loss', loss, total_steps)
+            total_loss += loss.item()
+
+            # 학습 단계별 손실 로깅 (매 스텝)
+            writer.add_scalar('Train/StepLoss', loss.item(), total_steps)
 
             # Target network update (일정 주기로 실행)
             if total_steps % opt.target_update_freq == 0:
                 target_model.load_state_dict(model.state_dict())
 
-        # Episode 종료 시 로깅
-        writer.add_scalar('Episode/Reward', env.score, num_episodes)
-        writer.add_scalar('Episode/Cleared lines',
-                          env.cleared_lines, num_episodes)
+            # Episode 종료 시 로깅
+            if num_episodes % opt.save_interval == 0:
+                if num_episodes < 2000:
+                    continue
+                torch.save(
+                    model, f"{opt.saved_path}/tetris_episode_{num_episodes}")
 
-        if num_episodes % opt.save_interval == 0:
-            torch.save(
-                model, f"{opt.saved_path}/tetris_episode_{num_episodes}")
-        print(
-            f"Episode {num_episodes}, Steps {total_steps}, Reward {env.score}, Cleared lines {env.cleared_lines}")
+            print(
+                f"Episode {num_episodes}, Steps {total_steps}, Avg loss {total_loss / num_episodes},  Reward {env.score}, Cleared lines {env.cleared_lines}")
+
+        if total_loss != 0:
+            # Episode 종료 시 로깅
+            writer.add_scalar('Episode/AverageLoss', total_loss /
+                              episode_steps, num_episodes)
+            writer.add_scalar('Episode/Reward', env.score, num_episodes)
+            writer.add_scalar('Episode/Cleared lines',
+                              env.cleared_lines, num_episodes)
 
     torch.save(model, f"{opt.saved_path}/tetris_episode_{num_episodes}")
 
