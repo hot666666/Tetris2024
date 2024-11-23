@@ -21,7 +21,7 @@ def get_args():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--gamma", type=float, default=0.99)
 
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=512)
 
     parser.add_argument("--initial_epsilon", type=float, default=1.0)
     parser.add_argument("--final_epsilon", type=float, default=0.01)
@@ -159,20 +159,19 @@ def train(opt):
             if total_steps % opt.target_update_freq == 0:
                 target_model.load_state_dict(model.state_dict())
 
-            # Episode 종료 시 로깅
-            if num_episodes % opt.save_interval == 0:
-                if num_episodes < 2000:
-                    continue
-                torch.save(
-                    model, f"{opt.saved_path}/tetris_episode_{num_episodes}")
+        # Episode 종료 시 로깅
+        if num_episodes < 2000 and num_episodes % opt.save_interval == 0:
+            torch.save(
+                model, f"{opt.saved_path}/tetris_episode_{num_episodes}")
 
-            print(
-                f"Episode {num_episodes}, Steps {total_steps}, Avg loss {total_loss / num_episodes},  Reward {env.score}, Cleared lines {env.cleared_lines}")
+        # 에피소드 로그 출력
+        avg_loss = total_loss / episode_steps if episode_steps > 0 else 0
+        print(
+            f"Episode {num_episodes}, Steps {total_steps}, Avg loss {avg_loss},  Reward {env.score}, Cleared lines {env.cleared_lines}")
 
         if total_loss != 0:
             # Episode 종료 시 로깅
-            writer.add_scalar('Episode/AverageLoss', total_loss /
-                              episode_steps, num_episodes)
+            writer.add_scalar('Episode/AverageLoss', avg_loss, num_episodes)
             writer.add_scalar('Episode/Reward', env.score, num_episodes)
             writer.add_scalar('Episode/Cleared lines',
                               env.cleared_lines, num_episodes)
