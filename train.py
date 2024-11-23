@@ -111,7 +111,6 @@ def train(opt):
 
             # Training step
             if len(replay_memory) < max(opt.batch_size, opt.replay_memory_size // 10):
-                num_episodes -= 1
                 continue
 
             # Batch 샘플링
@@ -160,10 +159,11 @@ def train(opt):
                 model, f"{opt.saved_path}/tetris_episode_{num_episodes}")
 
         # 에피소드 로그 출력
-        avg_loss = total_loss / episode_steps if episode_steps > 0 else 0
+        avg_loss = total_loss / episode_steps if total_loss > 0 else 0
         if avg_loss > 0:
             print(
-                f"Episode {num_episodes}, Total Steps {total_steps}, Avg loss {avg_loss if avg_loss > 0 else ""},  Reward {env.score}, Cleared lines {env.cleared_lines}")
+                f"Episode {num_episodes}, Total Steps {total_steps}, Avg loss {avg_loss},  Reward {env.score}, Cleared lines {env.cleared_lines}"
+            )
 
             # Episode 종료 시 로깅
             writer.add_scalar('Episode/AverageLoss', avg_loss, num_episodes)
