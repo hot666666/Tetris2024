@@ -113,6 +113,10 @@ def train(opt):
             if len(replay_memory) < max(opt.batch_size, opt.replay_memory_size // 10):
                 continue
 
+            # train_freq만큼 학습
+            if total_steps % opt.train_freq != 0:
+                continue
+
             # Batch 샘플링
             batch = sample(replay_memory, opt.batch_size)
             state_batch, reward_batch, next_state_batch, done_batch = zip(
@@ -162,7 +166,7 @@ def train(opt):
         avg_loss = total_loss / episode_steps if total_loss > 0 else 0
         if avg_loss > 0:
             print(
-                f"Episode {num_episodes}, Total Steps {total_steps}, Avg loss {avg_loss},  Reward {env.score}, Cleared lines {env.cleared_lines}"
+                f"Episode {num_episodes}, Total Steps {total_steps}, Episode Steps {episode_steps}, Avg loss {avg_loss},  Reward {env.score}, Cleared lines {env.cleared_lines}"
             )
 
             # Episode 종료 시 로깅
@@ -172,7 +176,7 @@ def train(opt):
                               env.cleared_lines, num_episodes)
         else:
             print(
-                f"Episode {num_episodes}, Total Steps {total_steps}, Reward {env.score}, Cleared lines {env.cleared_lines}")
+                f"Episode {num_episodes}, Total Steps {total_steps}, Episode Steps {episode_steps}, Reward {env.score}, Cleared Lines {env.cleared_lines}")
 
     torch.save(model, f"{opt.saved_path}/tetris_episode_{num_episodes}")
 
