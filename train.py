@@ -122,37 +122,40 @@ def train(opt):
             state = next_state
 
             # Training step (일정 주기로 실행)
-            if total_steps % opt.train_freq == 0 and len(replay_memory) >= opt.batch_size:
-                # Batch 샘플링
-                batch = sample(replay_memory, opt.batch_size)
-                state_batch, reward_batch, next_state_batch, done_batch = zip(
-                    *batch)
+            # if total_steps % opt.train_freq == 0 and len(replay_memory) >= opt.batch_size:
+            if len(replay_memory) < opt.batch_size or len(replay_memory) < opt.replay_memory_size // 10:
+                continue
 
-                # Batch 데이터 준비
-                state_batch = torch.stack(
-                    tuple(state for state in state_batch)).to(device)
-                reward_batch = torch.from_numpy(
-                    np.array(reward_batch, dtype=np.float32)[:, None]).to(device)
-                next_state_batch = torch.stack(
-                    tuple(state for state in next_state_batch)).to(device)
+            # Batch 샘플링
+            batch = sample(replay_memory, opt.batch_size)
+            state_batch, reward_batch, next_state_batch, done_batch = zip(
+                *batch)
 
-                # Q-learning update
-                with torch.no_grad():
-                    next_prediction_batch = target_model(next_state_batch)
-                q_values = model(state_batch)
+            # Batch 데이터 준비
+            state_batch = torch.stack(
+                tuple(state for state in state_batch)).to(device)
+            reward_batch = torch.from_numpy(
+                np.array(reward_batch, dtype=np.float32)[:, None]).to(device)
+            next_state_batch = torch.stack(
+                tuple(state for state in next_state_batch)).to(device)
 
-                y_batch = torch.cat(
-                    tuple(reward if done else reward + opt.gamma * prediction
-                          for reward, done, prediction in zip(reward_batch, done_batch, next_prediction_batch))
-                )[:, None]
+            # Q-learning update
+            with torch.no_grad():
+                next_prediction_batch = target_model(next_state_batch)
+            q_values = model(state_batch)
 
-                # Optimization
-                loss = F.mse_loss(q_values, y_batch)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+            y_batch = torch.cat(
+                tuple(reward if done else reward + opt.gamma * prediction
+                      for reward, done, prediction in zip(reward_batch, done_batch, next_prediction_batch))
+            )[:, None]
 
-                writer.add_scalar('Train/Loss', loss, total_steps)
+            # Optimization
+            loss = F.mse_loss(q_values, y_batch)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            writer.add_scalar('Train/Loss', loss, total_steps)
 
             # Target network update (일정 주기로 실행)
             if total_steps % opt.target_update_freq == 0:
