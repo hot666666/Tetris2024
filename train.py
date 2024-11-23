@@ -1,6 +1,5 @@
 import argparse
 import os
-import shutil
 from random import random, randint, sample
 
 import numpy as np
@@ -18,43 +17,54 @@ def get_args():
     parser.add_argument("--width", type=int, default=10)
     parser.add_argument("--height", type=int, default=20)
     parser.add_argument("--block_size", type=int, default=30)
-    parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--tau", type=float, default=1.0)
+
+    parser.add_argument("--batch_size", type=int, default=64)
+
     parser.add_argument("--initial_epsilon", type=float, default=1)
-    parser.add_argument("--final_epsilon", type=float, default=1e-3)
-    parser.add_argument("--num_decay_epochs", type=float, default=2000)
-    parser.add_argument("--num_epochs", type=int, default=6000)
-    parser.add_argument("--save_interval", type=int, default=200)
-    parser.add_argument("--replay_memory_size", type=int, default=30000)
+    parser.add_argument("--final_epsilon", type=float, default=0.1)
+    parser.add_argument("--num_decay_steps", type=float, default=10000)
+
+    parser.add_argument("--num_episodes", type=int, default=20000)
+    parser.add_argument("--replay_memory_size", type=int, default=100000)
+    parser.add_argument("--train_freq", type=int, default=1)
+    parser.add_argument("--target_update_freq", type=int, default=2000)
+
+    parser.add_argument("--save_interval", type=int, default=100)
     parser.add_argument("--log_path", type=str, default="tensorboard")
     parser.add_argument("--saved_path", type=str, default="trained_models")
-    parser.add_argument("--target_network_frequency", type=int, default=2000)
-    parser.add_argument("--with_target_network", type=bool, default=True)
 
     args = parser.parse_args()
     return args
 
 
-def compute_epsilon(epoch, initial_epsilon, final_epsilon, num_decay_epochs):
-    epsilon_decay = max(num_decay_epochs - epoch, 0) * \
-        (initial_epsilon - final_epsilon) / num_decay_epochs
+def compute_epsilon(total_steps, initial_epsilon, final_epsilon, num_decay_steps):
+    # 남은 decay steps 계산 (최소 0)
+    remaining_decay = max(num_decay_steps - total_steps, 0)
 
-    return final_epsilon + epsilon_decay
+    # Linear decay 계산
+    epsilon_decay = remaining_decay * \
+        (initial_epsilon - final_epsilon) / num_decay_steps
+
+    # 최종 epsilon = 최소값 + decay값
+    current_epsilon = final_epsilon + epsilon_decay
+
+    return current_epsilon
 
 
 def epsilon_greedy_policy(predictions, num_actions, epsilon):
-    if random() <= epsilon:
-        # 탐험: 무작위 행동 선택
+    if random() <= epsilon:  # 탐험: 무작위 행동 선택
         return randint(0, num_actions - 1)
-    else:
-        # 활용: 최대 Q-value 행동 선택
+    else:  # 활용: 최대 Q-value 행동 선택
         return torch.argmax(predictions).item()
 
 
 def train(opt):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    num_episodes = 0
+    total_steps = 0
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed(42)
@@ -72,90 +82,94 @@ def train(opt):
     replay_memory = deque(maxlen=opt.replay_memory_size)
 
     env = Tetris(width=opt.width, height=opt.height, block_size=opt.block_size)
-    state = env.reset()
-    state = state.to(device)
 
-    epoch = 0
-    while epoch < opt.num_epochs:
-        epsilon = compute_epsilon(epoch=epoch,
-                                  initial_epsilon=opt.initial_epsilon,
-                                  final_epsilon=opt.final_epsilon,
-                                  num_decay_epochs=opt.num_decay_epochs)
+    while num_episodes < opt.num_episodes:
+        num_episodes += 1
+        episode_reward = 0
+        episode_cleared_lines = 0
+        state = env.reset().to(device)
+        done = False
 
-        next_steps = env.get_next_states()
-        next_actions, next_states = zip(*next_steps.items())
-        next_states = torch.stack(next_states).to(device)
+        # Episode 실행
+        while not done:
+            total_steps += 1
 
-        predictions = model(next_states)[:, 0]
+            # Epsilon-greedy로 행동 선택
+            epsilon = compute_epsilon(
+                total_steps=total_steps,
+                initial_epsilon=opt.initial_epsilon,
+                final_epsilon=opt.final_epsilon,
+                num_decay_steps=opt.num_decay_steps)
 
-        index = epsilon_greedy_policy(predictions, len(next_steps), epsilon)
-        next_state = next_states[index, :].to(device)
-        action = next_actions[index]
+            next_steps = env.get_next_states()
+            next_actions, next_states = zip(*next_steps.items())
+            next_states = torch.stack(next_states).to(device)
 
-        reward, done = env.step(action, render=False)
+            predictions = model(next_states)[:, 0]
+            index = epsilon_greedy_policy(
+                predictions, len(next_steps), epsilon)
+            next_state = next_states[index, :].to(device)
+            action = next_actions[index]
 
-        replay_memory.append([state, reward, next_state, done])
+            # 환경과 상호작용
+            reward, done = env.step(action, render=False)
 
-        if done:
-            final_score = env.score
-            final_cleared_lines = env.cleared_lines
-            state = env.reset().to(device)
-        else:
+            # 경험 저장
+            replay_memory.append([state, reward, next_state, done])
+            if len(replay_memory) > opt.replay_memory_size:
+                replay_memory.popleft()
+
             state = next_state
-            continue
 
-        if len(replay_memory) < opt.replay_memory_size / 10:
-            continue
+            # Training step (일정 주기로 실행)
+            if total_steps % opt.train_freq == 0 and len(replay_memory) >= opt.batch_size:
+                # Batch 샘플링
+                batch = sample(replay_memory, opt.batch_size)
+                state_batch, reward_batch, next_state_batch, done_batch = zip(
+                    *batch)
 
-        epoch += 1
+                # Batch 데이터 준비
+                state_batch = torch.stack(
+                    tuple(state for state in state_batch)).to(device)
+                reward_batch = torch.from_numpy(
+                    np.array(reward_batch, dtype=np.float32)[:, None]).to(device)
+                next_state_batch = torch.stack(
+                    tuple(state for state in next_state_batch)).to(device)
 
-        batch = sample(replay_memory, min(len(replay_memory), opt.batch_size))
-        state_batch, reward_batch, next_state_batch, done_batch = zip(*batch)
+                # Q-learning update
+                with torch.no_grad():
+                    next_prediction_batch = target_model(next_state_batch)
+                q_values = model(state_batch)
 
-        state_batch = torch.stack(
-            tuple(state for state in state_batch)).to(device)
-        reward_batch = torch.from_numpy(
-            np.array(reward_batch, dtype=np.float32)[:, None]).to(device)
-        next_state_batch = torch.stack(
-            tuple(state for state in next_state_batch)).to(device)
+                y_batch = torch.cat(
+                    tuple(reward if done else reward + opt.gamma * prediction
+                          for reward, done, prediction in zip(reward_batch, done_batch, next_prediction_batch))
+                )[:, None]
 
-        with torch.no_grad():
-            next_prediction_batch = target_model(next_state_batch)
-        q_values = model(state_batch)
+                # Optimization
+                loss = F.mse_loss(q_values, y_batch)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-        y_batch = torch.cat(
-            tuple(reward if done else reward + opt.gamma * prediction
-                  for reward, done, prediction in zip(reward_batch, done_batch, next_prediction_batch))
-        )[:, None]
+                writer.add_scalar('Train/Loss', loss, total_steps)
 
-        loss = F.mse_loss(q_values, y_batch)
+            # Target network update (일정 주기로 실행)
+            if total_steps % opt.target_update_freq == 0:
+                target_model.load_state_dict(model.state_dict())
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        # Episode 종료 시 로깅
+        writer.add_scalar('Episode/Reward', env.score, num_episodes)
+        writer.add_scalar('Episode/Cleared lines',
+                          env.cleared_lines, num_episodes)
 
-        if opt.with_target and epoch % opt.target_network_frequency == 0:
-            for target_network_param, q_network_param in zip(
-                target_model.parameters(), model.parameters()
-            ):
-                target_network_param.data.copy_(
-                    opt.tau * q_network_param.data +
-                    (1.0 - opt.tau) * target_network_param.data
-                )
+        if num_episodes % opt.save_interval == 0:
+            torch.save(
+                model, f"{opt.saved_path}/tetris_episode_{num_episodes}")
+        print(
+            f"Episode {num_episodes}, Steps {total_steps}, Reward {env.score}, Cleared lines {env.cleared_lines}")
 
-        if epoch % 100 == 0:
-            print(
-                f"Epoch: {epoch}/{opt.num_epochs}, Score: {final_score}, : Cleared lines: {final_cleared_lines}")
-
-        writer.add_scalar('Train/Score', final_score, epoch - 1)
-        writer.add_scalar('Train/Cleared lines',
-                          final_cleared_lines, epoch - 1)
-        writer.add_scalar('Train/Loss', loss, epoch - 1)
-
-        if epoch > 0 and epoch % opt.save_interval == 0:
-            torch.save(model, f"{opt.saved_path}/tetris_{epoch}")
-
-    torch.save(model, f"{opt.saved_path}/tetris_{epoch}")
+    torch.save(model, f"{opt.saved_path}/tetris_episode_{num_episodes}")
 
 
 if __name__ == "__main__":
@@ -164,8 +178,7 @@ if __name__ == "__main__":
     if not os.path.isdir(opt.saved_path):
         os.makedirs(opt.saved_path)
 
-    if os.path.isdir(opt.log_path):
-        shutil.rmtree(opt.log_path)
-    os.makedirs(opt.log_path)
+    if not os.path.isdir(opt.log_path):
+        os.makedirs(opt.log_path)
 
     train(opt)
