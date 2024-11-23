@@ -26,11 +26,12 @@ def get_args():
     parser.add_argument("--final_epsilon", type=float, default=1e-3)
     parser.add_argument("--num_decay_epochs", type=float, default=2000)
     parser.add_argument("--num_epochs", type=int, default=6000)
-    parser.add_argument("--save_interval", type=int, default=300)
+    parser.add_argument("--save_interval", type=int, default=200)
     parser.add_argument("--replay_memory_size", type=int, default=30000)
     parser.add_argument("--log_path", type=str, default="tensorboard")
     parser.add_argument("--saved_path", type=str, default="trained_models")
     parser.add_argument("--target_network_frequency", type=int, default=2000)
+    parser.add_argument("--with_target_network", type=bool, default=True)
 
     args = parser.parse_args()
     return args
@@ -55,12 +56,12 @@ def epsilon_greedy_policy(predictions, num_actions, epsilon):
 def train(opt):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    torch.manual_seed(42)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
+        torch.cuda.manual_seed(42)
+    else:
+        torch.manual_seed(42)
 
     writer = SummaryWriter(opt.log_path)
-    env = Tetris(width=opt.width, height=opt.height, block_size=opt.block_size)
 
     model = DQN().to(device)
     target_model = DQN().to(device)
@@ -70,6 +71,7 @@ def train(opt):
 
     replay_memory = deque(maxlen=opt.replay_memory_size)
 
+    env = Tetris(width=opt.width, height=opt.height, block_size=opt.block_size)
     state = env.reset()
     state = state.to(device)
 
@@ -132,7 +134,7 @@ def train(opt):
         loss.backward()
         optimizer.step()
 
-        if epoch % opt.target_network_frequency == 0:
+        if opt.with_target and epoch % opt.target_network_frequency == 0:
             for target_network_param, q_network_param in zip(
                 target_model.parameters(), model.parameters()
             ):
@@ -148,6 +150,7 @@ def train(opt):
         writer.add_scalar('Train/Score', final_score, epoch - 1)
         writer.add_scalar('Train/Cleared lines',
                           final_cleared_lines, epoch - 1)
+        writer.add_scalar('Train/Loss', loss, epoch - 1)
 
         if epoch > 0 and epoch % opt.save_interval == 0:
             torch.save(model, f"{opt.saved_path}/tetris_{epoch}")

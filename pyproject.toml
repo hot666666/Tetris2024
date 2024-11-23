@@ -12,6 +12,7 @@ pillow = "^11.0.0"
 torch = "^2.5.1"
 opencv-python = "^4.10.0.84"
 tensorboardx = "^2.6.2.2"
+tensorboard = "^2.18.0"
 
 
 [build-system]
